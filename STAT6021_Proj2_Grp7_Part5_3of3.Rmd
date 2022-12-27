@@ -1,0 +1,1159 @@
+---
+title: 'STAT 6021: Project 2'
+author: 'Grant Hanley ... User ID: yep8eq'
+date: "2022-11-01"
+output:
+  html_document: 
+    toc: true
+    toc_float: true
+    toc_depth: 5
+    df_print: paged
+    css: style_pro.css
+  pdf_document: default
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r Requirements, include = FALSE}
+ library(rmarkdown)
+ library(knitr) #supports organization and setting options in r markdown
+ library(ggplot2)
+ library(tidyverse)
+ library(ggthemes) #used for customizing the theme
+ library(extrafont) #used for customize fonts
+ library(viridis) #used for unique color pallete additions to ggplot
+ library(RColorBrewer) #another color pallette add on
+ library(tinytex) #for special fonts
+ loadfonts(device = "all") #loads fonts from extrafont
+ library(GGally) #for ggplot add ons
+ library(dplyr) #within tidyverse
+ library(caret) #for ROC things
+ library(pROC) #for ROC things
+ library(equatiomatic) #for automatic fancy equations
+ library(leaps) #for linear reg optimization
+ library(ggpubr) #for ggplot add ons
+ library(grid) #for ggplot add ons
+``` 
+
+```{r, echo=FALSE}
+#comic sans meme theme
+my_comics_theme<-function(){
+  theme_classic()+
+  theme(text=element_text(size=12,  family="Comic Sans MS"))
+}
+
+#Professional Looking theme
+my_pro_theme<-function(){
+  theme_bw()+
+  theme(text=element_text(size=12,  family="sans"))
+}
+
+```
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(warnings=FALSE, fig.align="center" , out.width="70%", echo = TRUE, root.dir="/Users/gdhan/Documents/Academic/UVA_MSDS/STAT6021/Project_2")
+setwd("~/Documents/Academic/UVA_MSDS/STAT6021/Project_2")
+```
+
+------------------------------------------------------------------------
+
+### **Load**
+
+```{r, Load Data}
+ccd <- CreditCardDefault <- read.csv("~/Downloads/CreditCardDefault.csv")
+ head(ccd, 3)
+```
+### **Data Wrangling Part 1**
+```{r, Data Wrangling for Linear Regression}
+ccd <- CreditCardDefault <- read.csv("~/Downloads/CreditCardDefault.csv")
+
+#subset data to only the well defined dataset
+#The original dataset contained information outside of the defined descriptions provided by the source. To handle these, we've narrowed those variables to content and observations that we understand.
+ccd<- subset(ccd, (ccd$EDUCATION %in% c(1, 2, 3, 4)))
+ccd<- subset(ccd, (ccd$MARRIAGE %in% c(1, 2)))
+
+#Setting categorical variables as factors
+#The original dataset was nearly entirely integers. Some categorical factors were converted to factor data type to enable use with R data visualizations and built in linear modeling tools. 
+ccd$DEFAULT <- as.factor(ccd$default.payment.next.month)
+ccd$SEX <- as.factor(ccd$SEX)
+ccd$EDUCATION <- as.factor(ccd$EDUCATION)
+ccd$MARRIAGE <- as.factor(ccd$MARRIAGE)
+
+#handle level naming conventions
+#To reduce confusion in visualization or reporting and interpretation the levels for the converted factors were renamed
+levels(ccd$DEFAULT) <- c("No Default Next Month", "Defaults Next Month")
+levels(ccd$SEX) <- c("Male", "Female")
+levels(ccd$MARRIAGE) <- c('Married','Single')
+levels(ccd$EDUCATION) <- c('Graduate School', 'University','High School', 'Other')
+
+#Feature Generation
+#These three features were created after some initial modeling with the belief that inclusion of these three variables may improve the model in some capacity. We speculate that including information about credit user average long run behavior over the five months preceding may reveal useful information in understanding they future bill amounts and accordingly their predicted probability of defaulting in the next month. 
+
+#credit utilization, numerical variable with the average bill amount divided by the limit balance per user
+ccd$AVG_UTILIZATION_RATE =(ccd$BILL_AMT2+ccd$BILL_AMT3+ccd$BILL_AMT4+ccd$BILL_AMT5+ccd$BILL_AMT6)/5/ccd$LIMIT_BAL
+
+#Create a logical binary variable for if the average monthly excess balance over the past five months was greater than the limit balance. 
+ccd$OVERSPENDER<-as.factor((ccd$BILL_AMT2+ccd$BILL_AMT3+ccd$BILL_AMT4+ccd$BILL_AMT5+ccd$BILL_AMT6)/5 > ccd$LIMIT_BAL)
+
+#Create a numerical variable which captures how much excess balance over the past three months is being carried. The idea here is that users who make payments greater than their statement balance will have a negative excess balance average over three months. Those who are having trouble paying or are carrying revolving credit will 
+ccd$TOTAL_EXCESS_BALANCE<-(((ccd$BILL_AMT2-ccd$PAY_AMT2+ccd$BILL_AMT3-ccd$PAY_AMT3+ccd$BILL_AMT4-ccd$PAY_AMT4+ccd$BILL_AMT5-ccd$PAY_AMT5+ccd$BILL_AMT6-ccd$PAY_AMT6)/5)-ccd$LIMIT_BAL)
+
+#For whatever the reason the dataset is unevenly split with different shares of males and females. We do not attempt to speculate why, but simply split the population by gender and resample to head off potential unobserved built in bias.
+#handle uneven Male and female data set, split sample by Male and Female and sample from each
+ccd_male<- subset(ccd, (ccd$SEX == 'Male'))
+ccd_female<- subset(ccd, (ccd$SEX == 'Female'))
+
+#this way everyone gets the same output
+set.seed((1234))
+
+#sample for even 50/50 split between males and females, size is determined by the smallest available subset, in this case males with 11616 observations
+ccd_male_sample <- sample_n(ccd_male, min(nrow(ccd_male), nrow(ccd_female)))
+ccd_female_sample <- sample_n(ccd_female, min(nrow(ccd_male), nrow(ccd_female)))
+ccd <- data.frame(rbind(ccd_male_sample,ccd_female_sample))
+
+#handle NANs by only selecting complete observations
+ccd<-ccd[complete.cases(ccd),]
+
+#Workspace cleanup
+rm(CreditCardDefault)
+rm(ccd_female)
+rm(ccd_male)
+rm(ccd_female_sample)
+rm(ccd_male_sample)
+
+#narrow our working dataset to features we will specifically use here
+#drop PAY_0, we would not have this information yet
+#drop BILL_AMT1, we are modeling this,...but retain for model accuracy checks
+#drop PAY_AMT1, we would not have this information yet...but retain for inclusion into logistic Regression.
+ccd <- ccd %>% dplyr::select(c(-PAY_0))
+
+#Because we are working with a relatively large dataset,  we choose to split the training and test data 50/50.
+set.seed((1234))
+#Split Data into train and test, ccd will remain train,  ccd.test will be test data
+Split_Data = sample(c(rep(0, 0.5 * nrow(ccd)), rep(1, 0.5 * nrow(ccd))))
+ccd.train<- ccd[Split_Data==0,]
+ccd.test<- ccd[Split_Data==1,]
+
+write.csv(ccd, "ccd.csv", row.names = FALSE)
+write.csv(ccd.train,"ccd.train.csv", row.names = FALSE)
+write.csv(ccd.test,"ccd.test.csv", row.names = FALSE)
+
+```
+
+### **Data Visualization**
+
+```{r Bar Plot For loop Exploration, include = FALSE, echo = FALSE, eval=FALSE}
+for (i in colnames(ccd)){
+  print(ggplot(ccd, aes(x=eval(parse(text = paste('ccd$',i))), fill=ccd$DEFAULT))+
+  geom_bar(position = "fill")+
+  labs(x =  paste('ccd$',i)))
+}
+
+set = c("SEX", "EDUCATION", "MARRIAGE", "OVERSPENDER")
+for (i in set){
+print(ggplot(ccd, aes(x=eval(parse(text = paste('ccd$',i))), fill=ccd$DEFAULT))+
+  geom_bar(position = "fill")+
+  labs(x =  paste(i)))
+}
+
+```
+
+#### Plot 1
+```{r Combined Bar Proportion Visualization of Categoricals, echo=FALSE}
+#Visualization one for the logistic Regression portion
+
+library(ggpubr)
+library(grid)
+attach(ccd)
+
+p1 = ggplot(ccd, aes(x=SEX, fill=DEFAULT))+
+  geom_bar(position = "fill")+
+  geom_hline(yintercept = mean(default.payment.next.month), color = 'black')+
+  labs(x = 'SEX')+
+  theme_minimal()+
+  coord_flip()
+
+p2 = ggplot(ccd, aes(x=EDUCATION, fill=DEFAULT))+
+  geom_bar(position = "fill")+
+  geom_hline(yintercept = mean(default.payment.next.month), color = 'black')+
+  labs(x = 'EDUCATION')+
+  theme_minimal()+
+  coord_flip()
+
+p3 = ggplot(ccd, aes(x=MARRIAGE, fill=DEFAULT))+
+  geom_bar(position = "fill")+
+  geom_hline(yintercept = mean(default.payment.next.month), color = 'black')+
+  labs(x = 'MARRIAGE')+
+  theme_minimal()+
+  coord_flip()
+
+p4 = ggplot(ccd, aes(x=OVERSPENDER, fill=DEFAULT))+
+  geom_bar(position = "fill")+
+  geom_hline(yintercept = mean(default.payment.next.month), color = 'black')+
+  labs(x = 'OVERSPENDER')+
+  theme_minimal()+
+  coord_flip()
+
+
+plot = ggarrange(p1+rremove('xlab'), p2+rremove('xlab'), p3+rremove('xlab'), p4+rremove('xlab'), ncol=1, nrow=4, common.legend = TRUE, legend="right",  label.y = 0, align = "hv")
+
+annotate_figure(plot, top = textGrob("Categorical Feature Proportion of Defaults in the Next Month") , left = textGrob("Categorical Feature", rot = 90, vjust = .5 , hjust=.5) , bottom = textGrob("Proportion"))
+
+```
+Data Visualization:
+Using proportion bar charts, we explore the categorical features within our data with intent to identify impactful predictors. Splitting by individuals that default, our response variable and what we are attempting to model predictions for with the logistic regression, we note possible differences based on Sex, Education, Marital Status, and the Overspender Flag. 
+
+The Overspender Flag and Other Education immediately stick out as features with a relative large difference in proportion of defaults in comparison the population average default proportion. Males appear to have a larger proportion of defaults within the data, but the magnitude of the effect is difficult to discern from visualization alone. Marriage also appears to have a slightly larger share of the population than which results in default. 
+
+```{r Box Plot For Loop Exploration, include=FALSE, echo = FALSE, eval=FALSE}
+for (i in colnames(ccd)){
+  print(ggplot(ccd, aes(x=ccd$DEFAULT, y=eval(parse(text = paste('ccd$',i))), fill=ccd$DEFAULT))+
+  geom_boxplot(outlier.size=1,outlier.colour="red")+
+  labs(y =  paste('df$',i)))
+}
+```
+
+#### Plot 2
+
+```{r Boxplots, echo=FALSE}
+#Include Age
+
+p5 = ggplot(ccd, aes(x=DEFAULT, y=LIMIT_BAL, fill=DEFAULT))+
+  geom_boxplot(outlier.size=1,outlier.colour="red")+
+  labs(y = 'LIMIT_BAL')+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90))
+
+p6 = ggplot(ccd, aes(x=DEFAULT, y=TOTAL_EXCESS_BALANCE, fill=DEFAULT))+
+  geom_boxplot(outlier.size=1,outlier.colour="red")+
+  labs(y = 'TOTAL_EXCESS_BALANCE')+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90))
+
+p7 = ggplot(ccd, aes(x=DEFAULT, y=AVG_UTILIZATION_RATE, fill=DEFAULT))+
+  geom_boxplot(outlier.size=1,outlier.colour="red")+
+  labs(y = 'AVG_UTILIZATION_RATE')+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90))
+
+p8 = ggplot(ccd, aes(x=DEFAULT, y=AGE, fill=DEFAULT))+
+  geom_boxplot(outlier.size=1,outlier.colour="red")+
+  labs(y = 'AGE')+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90))
+
+
+plot2 = ggarrange(p5+rremove('xlab'), p6+rremove('xlab'), p7+rremove('xlab'), p8 + rremove('xlab'), ncol=4, nrow=1, common.legend = TRUE, legend="right",  label.y = 0, align = "hv")
+
+annotate_figure(plot2, top = textGrob("Boxplots Split by Defaults in the Next Month") , left = textGrob("", rot = 90, vjust = .5 , hjust=.5))
+
+```
+Data Visualization: 
+We explore some of our numeric predictor variables using boxplots with outliers depicted in red. Limit Balance on average appears to be larger for those who do not default versus those that default. As we would expect with Total_Excess_Balance, the greater the balance over the limit balance, the more defaults on average. Average Credit Card Utilization Rates appear to have an a postive impact of the share of the population subset which defaults within the next month. 
+
+```{r Scatter Plot For loop Exploration, include = FALSE, echo=FALSE, eval=FALSE}
+
+#Warning: this will take a long time to run as it is making ALL of the scatter plots
+for(j in colnames(ccd)){
+  for (i in colnames(ccd)){
+    print(ggplot(ccd, aes(x=eval(parse(text = paste('ccd$',i))), y=eval(parse(text = paste('ccd$',j))), color=ccd$DEFAULT))+
+    geom_point()+
+    labs(x =  paste(i), y =  paste(j), title = paste(i, " by ", j)))
+  }}
+```
+
+```{r Density Plots For Loop Exploration, include=FALSE, echo = FALSE, eval=FALSE}
+i=1
+for (i in colnames(ccd)){
+  print(ggplot(ccd, aes( x=eval(parse(text = paste('ccd$',i))), fill=DEFAULT))+
+  geom_density(alpha = .4))+
+  labs(y =  paste('ccd$',i))
+}
+```
+
+#### Plot 3
+
+```{r Interesting Density Plots, warning = FALSE, echo = FALSE}
+p9 <- ggplot(ccd)+
+  geom_density(aes( x=log(AVG_UTILIZATION_RATE), fill=DEFAULT, alpha = .4))
+  
+p10<-ggplot(ccd)+
+  geom_density(aes( x=log(TOTAL_EXCESS_BALANCE), fill=DEFAULT, alpha = .4))
+
+p11<-ggplot(ccd)+
+  geom_density(aes( x=log(LIMIT_BAL), fill=DEFAULT, alpha = .4))
+
+p22 <- ggplot(ccd)+
+  geom_density(aes( x=AGE, fill=DEFAULT, alpha = .4))
+
+p23 <- ggplot(ccd)+
+  geom_density(aes( x=log(BILL_AMT1+.01), fill=DEFAULT, alpha = .4))
+
+p24 <- ggplot(ccd)+
+  geom_density(aes( x=log(PAY_AMT1+.01), fill=DEFAULT, alpha = .4))
+
+plot3 = ggarrange(p9, p10, p11, p22, p23, p24, ncol=1, nrow=6, common.legend = TRUE, legend="right",  label.y = 0, align = "hv")
+
+annotate_figure(plot3, top = textGrob("Density Plots of Numerical Features Split by Defaults in the Next Month") , left = textGrob("", rot = 90, vjust = .5 , hjust=.5))
+
+```
+Based on density plot visualization and comparison, there appears to be a difference in the distributions of Average Utilization Rate between those who default and those who do not default. Increases the average utilization rate appears to be associated with increased defaults. 
+
+#### Plot 4
+
+```{r PAY_AMT Density Plots, warning = FALSE, echo = FALSE}
+p16 <- ggplot(ccd)+
+  geom_density(aes(x=log(PAY_AMT1+.01), fill=DEFAULT), alpha = .4)
+
+p17<-ggplot(ccd)+
+  geom_density(aes( x=log(PAY_AMT2+.01), fill=DEFAULT, alpha = .4))
+
+p18<-ggplot(ccd)+
+  geom_density(aes( x=log(PAY_AMT3+.01), fill=DEFAULT, alpha = .4))
+
+plot4 = ggarrange(p16, p17, p18, ncol=1, nrow=3, common.legend = TRUE, legend="right",  label.y = 0, align = "hv")
+
+annotate_figure(plot4, top = textGrob("Density Plots of Numerical Features Split by Defaults in the Next Month") , left = textGrob("", rot = 90, vjust = .5 , hjust=.5))
+
+```
+
+#### Plot 5
+
+```{r BILL_AMT Density Plots, warning = FALSE, echo = FALSE}
+p19 <- ggplot(ccd)+
+  geom_density(aes( x=log(BILL_AMT1+.01), fill=DEFAULT, alpha = .4))
+
+p20<-ggplot(ccd)+
+  geom_density(aes( x=log(BILL_AMT2+.01), fill=DEFAULT, alpha = .4))
+
+p21<-ggplot(ccd)+
+  geom_density(aes( x=log(BILL_AMT3+.01), fill=DEFAULT, alpha = .4))
+
+plot5 = ggarrange(p19, p20, p21, ncol=1, nrow=3, common.legend = TRUE, legend="right",  label.y = 0, align = "hv")
+
+annotate_figure(plot5, top = textGrob("Density Plots of Numerical Features Split by Defaults in the Next Month") , left = textGrob("", rot = 90, vjust = .5 , hjust=.5))
+
+```
+
+----
+
+### **Linear Regression Model (Place Holder)** 
+
+```{r}
+linear<-lm(BILL_AMT1 ~ LIMIT_BAL+BILL_AMT2+BILL_AMT3+PAY_AMT2+PAY_AMT3+AGE+SEX+EDUCATION+MARRIAGE, data = ccd)
+summary(linear)
+```
+
+T-tests seem to indicate that AGE and MARRIAGESSingle are not significant, given the other variables in the model. Let's see if we can remove them.
+
+$H_{0} : B_{1} = B_{2} = B_{3} = B_{4} = ... B_{p} = 0$
+
+$H_{a}$ : at least one of the coefficients in $H_{0}$ is not zero.
+
+```{r}
+reduced<-lm(BILL_AMT1 ~ LIMIT_BAL+BILL_AMT2+BILL_AMT3+PAY_AMT2+PAY_AMT3+SEX+EDUCATION, data = ccd)
+anova(reduced,linear)
+```
+
+Our F statistic is 0.0494 with a p-value of 0.9518. We do not reject the null hypothesis. Our data suggests we can drop the predictors AGE and MARRIAGE and go with the reduced model.
+
+```{r}
+summary(reduced)
+```
+
+Let's double check our reduced model by doing the regsubsets() frunction to run all possible regressions on our original (full) predictor set.
+
+```{r}
+library(leaps)
+allreg<-regsubsets(BILL_AMT1 ~ LIMIT_BAL+BILL_AMT2+BILL_AMT3+PAY_AMT2+PAY_AMT3+AGE+SEX+EDUCATION+MARRIAGE, data = ccd, nbest = 2)
+summary(allreg)
+```
+
+Let's see which model has the best (highest) adjusted $R^{2}$.
+
+```{r}
+coef(allreg, which.max(summary(allreg)$adjr2))
+```
+
+
+This model dropped AGE and MARRIAGE like our reduced model did. It also dropped SEX.
+
+Let's see which model is has the best (lowest) Mallow's $C_p$.
+
+```{r}
+coef(allreg, which.min(summary(allreg)$cp))
+```
+
+This has the same predictors as the model which maximizes adjusted $R^2$. It drops AGE, MARRIAGE, and SEX.
+
+Let's see which model has the best (lowest) BIC.
+
+```{r}
+coef(allreg, which.min(summary(allreg)$bic))
+```
+
+This model removes some of the education factors. It's only a predictor for clients who attended university.
+
+Lastly, let's try a stepwise regression to see which model will be the best. We will start with an intercept-only model.
+
+```{r}
+regnull<- lm(BILL_AMT1 ~ 1, data = ccd)
+step(regnull, scope = list(lower=regnull, upper=linear), direction = "both")
+```
+
+The stepwise regression ends with the same predictors as our reduced model above. We remove only AGE and MARRIAGE.
+
+
+-----
+
+
+### **Data Wrangling Part 2**
+
+```{r Data Wrangling For Logistic Regression / Prediction}
+#Chose to standardize because of application scenario to Logistic Regression. If there are outliers in the data, it is a reasonable conclusion that they would contain important information. Standardization retains the impact of outliers.
+#endstate is numeric features only
+noscale <- function(x){x}
+standardscale <- function(x){(x-mean(x))/(sd(x))}
+minmaxscale <- function(x){(x-min(x))/(max(x)-min(x))}
+robustscale <- function(x){
+  Q <- quantile(x, probs=c(.25, .75), na.rm = FALSE)
+  return (x-median(x))/(Q[2]-Q[1])}
+  
+standardscale<-noscale
+
+ccd.scaled <- data.frame(ccd$LIMIT_BAL)
+ccd.scaled$LIMIT_BAL<- standardscale(ccd$LIMIT_BAL)
+ccd.scaled <- ccd.scaled %>% dplyr::select(-ccd.LIMIT_BAL)
+ccd.scaled$AGE<- standardscale(ccd$AGE)
+ccd.scaled$PAY_2<- standardscale(ccd$PAY_2)
+ccd.scaled$PAY_3<- standardscale(ccd$PAY_3)
+ccd.scaled$PAY_4<- standardscale(ccd$PAY_4)
+ccd.scaled$PAY_5<- standardscale(ccd$PAY_5)
+ccd.scaled$PAY_6<- standardscale(ccd$PAY_6)
+ccd.scaled$BILL_AMT1<- standardscale(ccd$BILL_AMT1)
+ccd.scaled$BILL_AMT2<- standardscale(ccd$BILL_AMT2)
+ccd.scaled$BILL_AMT3<- standardscale(ccd$BILL_AMT3)
+ccd.scaled$BILL_AMT4<- standardscale(ccd$BILL_AMT4)
+ccd.scaled$BILL_AMT5<- standardscale(ccd$BILL_AMT5)
+ccd.scaled$BILL_AMT6<- standardscale(ccd$BILL_AMT6)
+ccd.scaled$PAY_AMT1<- standardscale(ccd$PAY_AMT1)
+ccd.scaled$PAY_AMT2<- standardscale(ccd$PAY_AMT2)
+ccd.scaled$PAY_AMT3<- standardscale(ccd$PAY_AMT3)
+ccd.scaled$PAY_AMT4<- standardscale(ccd$PAY_AMT4)
+ccd.scaled$PAY_AMT5<- standardscale(ccd$PAY_AMT5)
+ccd.scaled$PAY_AMT6<- standardscale(ccd$PAY_AMT6)
+ccd.scaled$DEFAULT <- as.numeric(ifelse(ccd$default.payment.next.month == 1,1,0))
+ccd.scaled$AVG_UTILIZATION_RATE <- standardscale(ccd$AVG_UTILIZATION_RATE)
+ccd.scaled$OVERSPENDER <- ifelse(ccd$OVERSPENDER == 1, 1,0)
+ccd.scaled$TOTAL_EXCESS_BALANCE <- standardscale(ccd$TOTAL_EXCESS_BALANCE)
+ccd.scaled$MARRIAGE <- ccd$MARRIAGE
+ccd.scaled$EDUCATION <- ccd$EDUCATION
+ccd.scaled$SEX <- ccd$SEX
+
+#May not be necessary...yet
+#ccd.scaled$SEX_MALE <- ifelse(ccd$SEX == 'Male', 1, 0)
+#ccd.scaled$SEX_FEMALE <- ifelse(ccd$SEX == 'Female', 1, 0)
+#ccd.scaled$EDU_GRAD <- ifelse(ccd$EDUCATION == 'Graduate School', 1, 0)
+#ccd.scaled$EDU_UNIVERSITY <- ifelse(ccd$EDUCATION == 'University', 1, 0)
+#ccd.scaled$EDU_HIGH_SCHOOL <- ifelse(ccd$EDUCATION == 'High School', 1, 0)
+#ccd.scaled$EDU_OTHER <- ifelse(ccd$EDUCATION == 'Other', 1, 0)
+#ccd.scaled$MARRIAGE_M <- ifelse(ccd$MARRIAGE == 'Married', 1, 0)
+#ccd.scaled$MARRIAGE_S <- ifelse(ccd$MARRIAGE == 'Single', 1, 0)
+
+#Feature Scaling References
+#REF: https://www.oreilly.com/library/view/hands-on-machine-learning/9781788393485/fd5b8a44-e9d3-4c19-bebb-c2fa5a5ebfee.xhtml
+#REF: https://vitalflux.com/minmaxscaler-standardscaler-python-examples/
+#REF: https://becominghuman.ai/what-does-feature-scaling-mean-when-to-normalize-data-and-when-to-standardize-data-c3de654405ed
+#REF: https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.MinMaxScaler.html
+#REF: https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.StandardScaler.html
+
+#Handling an imbalanced dataset, may need to resample the unbalanced dataset to account for fewer defaults
+#keep all of the defaults, randomly sample an equal number of non defaults
+ccd_defaults<- subset(ccd, (ccd$default.payment.next.month == 1))
+ccd_no_defaults <- subset(ccd, (ccd$default.payment.next.month == 0))
+
+#this way everyone gets the same output
+set.seed((1234))
+
+#unbalanced dataset of defaults and no defaults, resample for maximum number of defaults and equivalent no defaults.  
+#down sampling:
+ccd_no_defaults_downsample <- sample_n(ccd_no_defaults, nrow(ccd_defaults), replace = F)
+ccd_down_balanced <- data.frame(rbind(ccd_defaults,ccd_no_defaults_downsample))
+
+#up sampling:
+ccd_defaults_upsample <- sample_n(ccd_defaults, nrow(ccd_no_defaults), replace = T)
+ccd_up_balanced <- data.frame(rbind(ccd_no_defaults,ccd_defaults_upsample))
+```
+
+
+```{r Down sampled Balanced Create Training and Test Data}
+set.seed((1234))
+#Split Data into train and test, ccd will remain train,  ccd.test will be test data
+Split_Data = sample(c(rep(0, 0.5 * nrow(ccd_down_balanced)), rep(1, 0.5 *nrow(ccd_down_balanced))))
+ccd.down.train<- ccd_down_balanced[Split_Data==0,]
+ccd.down.test<- ccd_down_balanced[Split_Data==1,]
+```
+
+```{r Up sampled Balanced Create Training and Test Data}
+set.seed((1234))
+#Split Data into train and test, ccd will remain train,  ccd.test will be test data
+Split_Data = sample(c(rep(0, 0.5 * nrow(ccd_up_balanced)), rep(1, 0.5 *nrow(ccd_up_balanced))))
+ccd.up.train<- ccd_up_balanced[Split_Data==0,]
+ccd.up.test<- ccd_up_balanced[Split_Data==1,]
+```
+
+```{r Scaled and Up sampled Create Training and Test Data}
+#Handling an imbalanced dataset, may need to resample the unbalanced dataset to account for fewer defaults
+#keep all of the defaults, randomly sample an equal number of non defaults
+ccd_defaults<- subset(ccd.scaled, (ccd.scaled$DEFAULT == 1))
+ccd_no_defaults <- subset(ccd.scaled, (ccd.scaled$DEFAULT == 0))
+
+#this way everyone gets the same output
+set.seed((1234))
+
+#unbalanced dataset of defaults and no defaults, resample for maximum number of defaults and equivalent no defaults.  
+#down sampling:
+ccd_no_defaults_downsample <- sample_n(ccd_no_defaults, nrow(ccd_defaults), replace = F)
+ccd_down_balanced <- data.frame(rbind(ccd_defaults,ccd_no_defaults_downsample))
+
+#up sampling:
+ccd_defaults_upsample <- sample_n(ccd_defaults, nrow(ccd_no_defaults), replace = T)
+ccd_up_balanced <- data.frame(rbind(ccd_no_defaults,ccd_defaults_upsample))
+
+set.seed((1234))
+#Split Data into train and test, ccd will remain train,  ccd.test will be test data
+Split_Data = sample(c(rep(0, 0.5 * nrow(ccd_up_balanced)), rep(1, 0.5 *nrow(ccd_up_balanced))))
+ccd.scaled.up.train<- ccd_up_balanced[Split_Data==0,]
+ccd.scaled.up.test<- ccd_up_balanced[Split_Data==1,]
+
+#clean workspace
+rm(ccd_defaults)
+rm(ccd_no_defaults)
+rm(ccd_no_defaults_downsample)
+rm(ccd_down_balanced)
+rm(ccd_defaults_upsample)
+rm(ccd_up_balanced)
+```
+
+```{r glue, synchronize the training and test set}
+#scaled up
+ccd.test = ccd.scaled.up.test
+ccd.train = ccd.scaled.up.train
+```
+
+### **Logistic Regression Model Building**
+
+#### Model 1: All Variables
+
+As a starting point, our first logistic regression model simply includes every feature available in the dataset.
+
+```{r Model 1: Everything, Warning = FALSE}
+mod1 = glm(formula = DEFAULT~LIMIT_BAL+BILL_AMT1+BILL_AMT2+BILL_AMT3+BILL_AMT4+BILL_AMT5+BILL_AMT6+PAY_AMT1+PAY_AMT2+PAY_AMT3+PAY_AMT4+PAY_AMT5+PAY_AMT6+AVG_UTILIZATION_RATE+PAY_2+PAY_3+PAY_4+PAY_5+PAY_6+SEX+MARRIAGE+EDUCATION+AGE, family = binomial(link = "logit"), data=ccd.train)                                                     
+summary(mod1)
+anova(mod1, test="Chisq")
+equatiomatic::extract_eq(mod1)
+```
+
+
+#### Model 2: With Interactions
+
+```{r Model 2: With Interactions}
+mod2 = glm(formula = DEFAULT~
+             BILL_AMT1+BILL_AMT2+BILL_AMT3+BILL_AMT4+BILL_AMT5+BILL_AMT6+
+             PAY_AMT1+PAY_AMT2+PAY_AMT3+PAY_AMT4+PAY_AMT5+PAY_AMT6+
+             PAY_2+PAY_3+PAY_4+PAY_5+PAY_6+
+             SEX*MARRIAGE+EDUCATION*AGE+LIMIT_BAL*AGE+AVG_UTILIZATION_RATE*AGE, family = binomial(link = "logit"), data=ccd.train)                                       
+summary(mod2)
+anova(mod2, test="Chisq")
+equatiomatic::extract_eq(mod2)
+```
+
+
+#### Model 3: Two Stage Model
+
+Predict Limit Balance, then incorporate those predictions into the logistic regression. Possible opportunity to demonstrate causality via two stage regression techniques that BILL_AMT1 and PAY_AMT1 directly impact the next month's default.
+
+```{r Model 3: Two Stage Model with Bill_AMT1 Predictions included in the second stage logistic regression}
+
+Bill_Amt_Lin_Reg = lm(formula = BILL_AMT1 ~ LIMIT_BAL+BILL_AMT2+BILL_AMT3+PAY_AMT2+PAY_AMT3+SEX+EDUCATION+AVG_UTILIZATION_RATE, data=ccd.train)
+
+summary(Bill_Amt_Lin_Reg) 
+anova(Bill_Amt_Lin_Reg)
+
+Pay_Amt_Lin_Reg = lm( formula = PAY_AMT1 ~ LIMIT_BAL+BILL_AMT2+BILL_AMT3+PAY_AMT2+PAY_AMT3+SEX+EDUCATION+AVG_UTILIZATION_RATE, data=ccd.train)
+
+summary(Pay_Amt_Lin_Reg)
+anova(Pay_Amt_Lin_Reg)
+
+ccd.train$BILL_AMT1_PRED<- predict(Bill_Amt_Lin_Reg, ccd.test)
+ccd.test$BILL_AMT1_PRED<- predict(Bill_Amt_Lin_Reg, ccd.test)
+
+ccd.train$PAY_AMT1_PRED<- predict(Pay_Amt_Lin_Reg, ccd.test)
+ccd.test$PAY_AMT1_PRED<- predict(Pay_Amt_Lin_Reg, ccd.test)
+
+mod3 = glm(formula = DEFAULT~LIMIT_BAL+BILL_AMT2+BILL_AMT3+PAY_AMT2+PAY_AMT3+SEX+EDUCATION+AVG_UTILIZATION_RATE+BILL_AMT1_PRED+PAY_AMT1_PRED, family = binomial(link = "logit"), data=ccd.train)    
+
+summary(mod3)
+anova(mod3, test="Chisq")
+equatiomatic::extract_eq(mod3)
+```
+
+#### Model 4: Logistic Transformation
+```{r Model 4: Logistic Transformation, warning=FALSE}
+mod4 = glm(formula = DEFAULT~log(LIMIT_BAL+.01)+SEX+AGE+log(BILL_AMT1_PRED+.01)+log(BILL_AMT2+.01)+log(BILL_AMT3+.01)+log(PAY_AMT1_PRED+.01)+log(PAY_AMT2+.01)+log(PAY_AMT3+.01)+log(AVG_UTILIZATION_RATE+10)+PAY_2+PAY_3, family = binomial(link = "logit"), data=ccd.train)
+summary(mod4)
+anova(mod4, test="Chisq")
+```
+
+
+### **Generate Model Predictions**
+```{r Make Predictions}
+#Make the Predictions
+ccd.test$DEFAULT_PROB_PREDICT = predict(mod4, ccd.test, type="response")
+
+#Define the prediction threshold
+threshold = .275
+
+#Generate Prediction 
+ccd.test$DEFAULT_PREDICTION <- ifelse(ccd.test$DEFAULT_PROB_PREDICT >= threshold, 1, 0 )
+
+table(factor(ccd.test$DEFAULT_PREDICTION),factor(ccd.test$DEFAULT))
+```
+
+```{r Predicted probability Density with Threshold, include = FALSE, echo = FALSE}
+ggplot(ccd.test, aes(x = DEFAULT_PROB_PREDICT)) +
+              geom_density()+
+              geom_vline(xintercept = .5)
+```
+
+### **Iterative Evaluation of Model Performance**
+
+```{r Predictions / Model Performance (Accuracy Recall TPR FPR F1 Calculations), eval = FALSE, Include = FALSE}
+#This was for the single use case.
+model_names = c("mod1", "mod2", "mod3", "mod4")
+description = c("Everything", "Interactions", "Two-Stage", "Log Transformation")
+
+Model_Performance<-as.data.frame(matrix(nrow=length(model_names),ncol=12))
+
+
+for(i in 1:length(model_names)){
+
+#Make the Predictions
+ccd.test$DEFAULT_PROB_PREDICT = predict(eval(parse(text = paste('mod',i,sep=""))), ccd.test, type="response")
+
+#Define the prediction threshold
+threshold = .25
+
+#Generate Prediction 
+ccd.test$DEFAULT_PREDICTION <- ifelse(ccd.test$DEFAULT_PROB_PREDICT >= threshold, 1, 0 )
+
+#Confusion Matrix Build
+table(factor(ccd.test$DEFAULT_PREDICTION),factor(ccd.test$DEFAULT))
+
+confusion_table = table(factor(ccd.test$DEFAULT_PREDICTION),factor(ccd.test$DEFAULT))
+confusion_values = c(confusion_table[1,1], confusion_table[2,1], confusion_table[1,2], confusion_table[2,2])
+Label = c('TN','FP','FN','TP')
+Prediction = c(0,1,0,1)
+Actual = c(0,0,1,1)
+confusion_frame = data.frame(Prediction, Actual, confusion_values, Label)
+colnames(confusion_frame)<- c("Prediction", "Actual","Frequency", "Label")
+confusion_frame
+
+colnames(Model_Performance)<-c("Name","Accuracy","Precision","Recall","Specificity","F1_Score","FPR", "TP", "TN", "FP", "FN", "Prediction_Threshold")
+
+#True Positives
+TP = as.numeric(confusion_frame$Frequency[confusion_frame$Label=="TP"])
+Model_Performance$TP[i] = TP
+
+#True Negatives
+TN = as.numeric(confusion_frame$Frequency[confusion_frame$Label=="TN"])
+Model_Performance$TN[i] = TN 
+
+#False Positive
+FP = as.numeric(confusion_frame$Frequency[confusion_frame$Label=="FP"])
+Model_Performance$FP[i] = FP
+
+#False Negatives
+FN = as.numeric(confusion_frame$Frequency[confusion_frame$Label=="FN"])
+Model_Performance$FN[i] = FN
+
+#Model Name
+Model_Performance$Name[i] = paste("Model ",i ,": ",description[i], sep = "")
+
+#Accuracy
+Model_Performance$Accuracy[i] = round((TP+TN)/(TP+TN+FP+FN),3)
+
+#Precision
+Model_Performance$Precision[i] = round(TP / (TP + FP),3)
+
+#Recall, Sensitivity, True Positive Rate, We likely want to optimize for recall 
+Model_Performance$Recall[i] = round(TP / (TP + FN),3)
+
+#Specificity 
+Model_Performance$Specificity[i] = round(TN / (TN + FP),3)
+
+# F1 Score
+Model_Performance$F1_Score[i] = round(2*TP / (2*TP + FP + FN),3)
+
+#False Positive Rate
+Model_Performance$FPR[i] = round(FP / (FP+TN),3)
+
+#Model Prediction Threshold
+Model_Performance$Prediction_Threshold[i] = threshold
+
+}
+
+
+Model_Performance
+```
+
+### **ROC Curve Build Model Comparison** 
+```{r AUC/ROC Curve and Model Performance Comparison, warning = FALSE, message=FALSE}
+
+ccd <- read.csv("~/Documents/Academic/UVA_MSDS/STAT6021/Project_2/ccd.csv")
+
+model_names = c("mod1", "mod2", "mod3", "mod4")
+description = c("Everything", "Interactions", "Two-Stage", "Log Transformation")
+scaling_type = c('No Scaling', 'MinMaxScaler', 'StandardScaler', 'RobustScaler')
+balancing_type = c('No Adjustment', 'Over-Sample', 'Under-Sample')
+
+Model_Performance<-as.data.frame(matrix(nrow=length(model_names)*length(seq(0,1,.025))*length(scaling_type)*length(balancing_type),ncol=15))
+
+#i represent a row entry
+i=1
+s=1
+b=1
+#loop through scaling, 'No Scaling', 'MinMaxScaler', 'StandardScaler', 'RobustScaler'
+
+for(s in scaling_type){ 
+  if(s == 'No Scaling'){
+    noscale <- function(x){x}
+    scale <- noscale
+    
+  }else if(s == 'MinMaxScaler'){
+
+    minmaxscale<-function(x){(x-min(x))/(max(x)-min(x))}
+    scale <- minmaxscale
+  }else if(s == 'StandardScaler'){
+    
+    standardscale<-function(x){(x-mean(x))/(sd(x))}
+    scale <- standardscale
+  }else if(s == 'RobustScaler'){
+  
+    robustscale<-function(x){
+          Q <- quantile(x, probs=c(.25, .75), na.rm = FALSE)
+          return (x-median(x))/(Q[2]-Q[1])}
+    scale <- robustscale
+  }
+
+ccd$DEFAULT <- as.numeric(ccd$default.payment.next.month)
+ccd.scaled <- data.frame(ccd$LIMIT_BAL)
+ccd.scaled$LIMIT_BAL<- scale(ccd$LIMIT_BAL)
+ccd.scaled <- ccd.scaled %>% dplyr::select(-ccd.LIMIT_BAL)
+ccd.scaled$AGE<- scale(ccd$AGE)
+ccd.scaled$PAY_2<- scale(ccd$PAY_2)
+ccd.scaled$PAY_3<- scale(ccd$PAY_3)
+ccd.scaled$PAY_4<- scale(ccd$PAY_4)
+ccd.scaled$PAY_5<- scale(ccd$PAY_5)
+ccd.scaled$PAY_6<- scale(ccd$PAY_6)
+ccd.scaled$BILL_AMT1<- scale(ccd$BILL_AMT1)
+ccd.scaled$BILL_AMT2<- scale(ccd$BILL_AMT2)
+ccd.scaled$BILL_AMT3<- scale(ccd$BILL_AMT3)
+ccd.scaled$BILL_AMT4<- scale(ccd$BILL_AMT4)
+ccd.scaled$BILL_AMT5<- scale(ccd$BILL_AMT5)
+ccd.scaled$BILL_AMT6<- scale(ccd$BILL_AMT6)
+ccd.scaled$PAY_AMT1<- scale(ccd$PAY_AMT1)
+ccd.scaled$PAY_AMT2<- scale(ccd$PAY_AMT2)
+ccd.scaled$PAY_AMT3<- scale(ccd$PAY_AMT3)
+ccd.scaled$PAY_AMT4<- scale(ccd$PAY_AMT4)
+ccd.scaled$PAY_AMT5<- scale(ccd$PAY_AMT5)
+ccd.scaled$PAY_AMT6<- scale(ccd$PAY_AMT6)
+ccd.scaled$DEFAULT <- as.numeric(ifelse(ccd$default.payment.next.month == 1,1,0))
+ccd.scaled$AVG_UTILIZATION_RATE <- scale(ccd$AVG_UTILIZATION_RATE)
+ccd.scaled$OVERSPENDER <- ifelse(ccd$OVERSPENDER == 1, 1,0)
+ccd.scaled$TOTAL_EXCESS_BALANCE <- scale(ccd$TOTAL_EXCESS_BALANCE)
+ccd.scaled$MARRIAGE <- ccd$MARRIAGE
+ccd.scaled$EDUCATION <- ccd$EDUCATION
+ccd.scaled$SEX <- ccd$SEX
+
+#Handling an imbalanced dataset, may need to resample the unbalanced dataset to account for fewer defaults
+#keep all of the defaults, randomly sample an equal number of non defaults
+ccd_defaults<- subset(ccd.scaled, (ccd.scaled$DEFAULT == 1))
+ccd_no_defaults <- subset(ccd.scaled, (ccd.scaled$DEFAULT == 0))
+
+#loop through sampling, 'No Adjustment', 'Upsample', 'Downsample'
+for(c in balancing_type){ 
+
+  if(c == 'No Adjustment'){
+    #Split Data into train and test, ccd will remain train,  ccd.test will be test data
+    Split_Data = sample(c(rep(0, 0.5 * nrow(ccd.scaled)), rep(1, 0.5 *nrow(ccd.scaled))))
+    ccd.train<- ccd.scaled[Split_Data==0,]
+    ccd.test<- ccd.scaled[Split_Data==1,]
+    
+  }else if(c == 'Over-Sample'){
+    
+    #up sampling:
+    ccd_defaults_upsample <- sample_n(ccd_defaults, nrow(ccd_no_defaults), replace = T)
+    ccd_up_balanced <- data.frame(rbind(ccd_no_defaults,ccd_defaults_upsample))
+    
+    #Split Data into train and test, ccd will remain train,  ccd.test will be test data
+    Split_Data = sample(c(rep(0, 0.5 * nrow(ccd_up_balanced)), rep(1, 0.5 *nrow(ccd_up_balanced))))
+    ccd.up.train<- ccd_up_balanced[Split_Data==0,]
+    ccd.up.test<- ccd_up_balanced[Split_Data==1,]
+
+    #synchronize
+    ccd.train <- ccd.up.train
+    ccd.test <- ccd.up.test
+    
+  }else if(c == 'Under-Sample'){
+
+    #unbalanced dataset of defaults and no defaults, resample for maximum number of defaults and equivalent no defaults.  
+    #down sampling:
+    ccd_no_defaults_downsample <- sample_n(ccd_no_defaults, nrow(ccd_defaults), replace = F)
+    ccd_down_balanced <- data.frame(rbind(ccd_defaults,ccd_no_defaults_downsample))
+    
+    #Split Data into train and test, ccd will remain train,  ccd.test will be test data
+    Split_Data = sample(c(rep(0, 0.5 * nrow(ccd_down_balanced)), rep(1, 0.5 *nrow(ccd_down_balanced))))
+    ccd.down.train<- ccd_down_balanced[Split_Data==0,]
+    ccd.down.test<- ccd_down_balanced[Split_Data==1,]
+    
+    #synchronize
+    ccd.train <- ccd.down.train
+    ccd.test <- ccd.down.test
+
+  }
+
+  #Mod 1
+  mod1 = glm(formula = DEFAULT~LIMIT_BAL+BILL_AMT1+BILL_AMT2+BILL_AMT3+BILL_AMT4+BILL_AMT5+BILL_AMT6+PAY_AMT1+PAY_AMT2+PAY_AMT3+PAY_AMT4+PAY_AMT5+PAY_AMT6+AVG_UTILIZATION_RATE+PAY_2+PAY_3+PAY_4+PAY_5+PAY_6+SEX+MARRIAGE+EDUCATION+AGE, family = binomial(link = "logit"), data=ccd.train)  
+  
+  #Mod2
+  mod2 = glm(formula = DEFAULT~
+             BILL_AMT1+BILL_AMT2+BILL_AMT3+BILL_AMT4+BILL_AMT5+BILL_AMT6+
+             PAY_AMT1+PAY_AMT2+PAY_AMT3+PAY_AMT4+PAY_AMT5+PAY_AMT6+
+             PAY_2+PAY_3+PAY_4+PAY_5+PAY_6+
+             MARRIAGE+LIMIT_BAL*AGE+AVG_UTILIZATION_RATE, family = binomial(link = "logit"), data=ccd.train)
+  
+  #Mod 3
+  Bill_Amt_Lin_Reg = lm(formula = BILL_AMT1 ~ LIMIT_BAL+BILL_AMT2+BILL_AMT3+PAY_AMT2+PAY_AMT3+SEX+EDUCATION+AVG_UTILIZATION_RATE, data=ccd.train)
+
+summary(Bill_Amt_Lin_Reg) 
+anova(Bill_Amt_Lin_Reg)
+
+Pay_Amt_Lin_Reg = lm( formula = PAY_AMT1 ~ LIMIT_BAL+BILL_AMT2+BILL_AMT3+PAY_AMT2+PAY_AMT3+SEX+EDUCATION+AVG_UTILIZATION_RATE, data=ccd.train)
+
+summary(Pay_Amt_Lin_Reg)
+anova(Pay_Amt_Lin_Reg)
+
+ccd.train$BILL_AMT1_PRED<- predict(Bill_Amt_Lin_Reg, ccd.test)
+ccd.test$BILL_AMT1_PRED<- predict(Bill_Amt_Lin_Reg, ccd.test)
+
+ccd.train$PAY_AMT1_PRED<- predict(Pay_Amt_Lin_Reg, ccd.test)
+ccd.test$PAY_AMT1_PRED<- predict(Pay_Amt_Lin_Reg, ccd.test)
+
+mod3 = glm(formula = DEFAULT~LIMIT_BAL+BILL_AMT2+BILL_AMT3+PAY_AMT2+PAY_AMT3+SEX+EDUCATION+AVG_UTILIZATION_RATE+BILL_AMT1_PRED+PAY_AMT1_PRED, family = binomial(link = "logit"), data=ccd.train)    
+
+#Mod 4
+mod4 = glm(formula = DEFAULT~log(LIMIT_BAL+.01)+SEX+AGE+log(BILL_AMT1_PRED+.01)+log(BILL_AMT2+.01)+log(BILL_AMT3+.01)+log(PAY_AMT1_PRED+.01)+log(PAY_AMT2+.01)+log(PAY_AMT3+.01)+log(AVG_UTILIZATION_RATE+.01)+PAY_2+PAY_3, family = binomial(link = "logit"), data=ccd.train)
+
+#loop through prediction interval
+for(j in seq(0,1,.025)){ 
+  
+#loop through models
+for(k in 1:length(model_names)){ 
+
+#Make the Predictions
+ccd.test$DEFAULT_PROB_PREDICT = predict(eval(parse(text = paste('mod',k,sep=""))), ccd.test, type="response")
+
+#Define the prediction threshold
+threshold = j
+
+#Generate Prediction 
+ccd.test$DEFAULT_PREDICTION <- ifelse(ccd.test$DEFAULT_PROB_PREDICT >= threshold, 1, 0 )
+
+#Confusion Matrix Build
+confusion_table = table(factor(ccd.test$DEFAULT_PREDICTION),factor(ccd.test$DEFAULT))
+
+if(length(confusion_table) == 4){
+confusion_values = c(confusion_table[1,1], confusion_table[2,1], confusion_table[1,2], confusion_table[2,2])
+Label = c('TN','FP','FN','TP')
+Prediction = c(0,1,0,1)
+Actual = c(0,0,1,1)
+confusion_frame = data.frame(Prediction, Actual, confusion_values, Label)
+colnames(confusion_frame)<- c("Prediction", "Actual","Frequency", "Label")
+confusion_frame
+}else if(length(confusion_table) == 2){
+confusion_values = c(confusion_table[1,1], 0, confusion_table[1,2],0)
+Label = c('TN','FP','FN','TP')
+Prediction = c(0,1,0,1)
+Actual = c(0,0,1,1)
+confusion_frame = data.frame(Prediction, Actual, confusion_values, Label)
+colnames(confusion_frame)<- c("Prediction", "Actual","Frequency", "Label")
+confusion_frame
+}
+
+colnames(Model_Performance)<-c("Name","Scaling", "Sampling", "Accuracy","Precision","Recall","Specificity","F1_Score","FPR", "TP", "TN", "FP", "FN", "Prediction_Threshold", "AUC")
+
+#True Positives
+TP = as.numeric(confusion_frame$Frequency[confusion_frame$Label=="TP"])
+Model_Performance$TP[i] = TP
+
+#True Negatives
+TN = as.numeric(confusion_frame$Frequency[confusion_frame$Label=="TN"])
+Model_Performance$TN[i] = TN 
+
+#False Positive
+FP = as.numeric(confusion_frame$Frequency[confusion_frame$Label=="FP"])
+Model_Performance$FP[i] = FP
+
+#False Negatives
+FN = as.numeric(confusion_frame$Frequency[confusion_frame$Label=="FN"])
+Model_Performance$FN[i] = FN
+
+#Model Name
+Model_Performance$Name[i] = paste("Model ",k ,": ",description[k], sep = "")
+
+#Accuracy
+Model_Performance$Accuracy[i] = round((TP+TN)/(TP+TN+FP+FN),3)
+
+#Precision
+Model_Performance$Precision[i] = round(TP / (TP + FP),3)
+
+#Recall, Sensitivity, True Positive Rate, We likely want to optimize for recall 
+Model_Performance$Recall[i] = round(TP / (TP + FN),3)
+
+#Specificity 
+Model_Performance$Specificity[i] = round(TN / (TN + FP),3)
+
+# F1 Score
+Model_Performance$F1_Score[i] = round(2*TP / (2*TP + FP + FN),3)
+
+#False Positive Rate
+Model_Performance$FPR[i] = round(FP / (FP+TN),3)
+
+#Model Prediction Threshold
+Model_Performance$Prediction_Threshold[i] = threshold
+
+#Area Under the Curve
+Model_Performance$AUC[i] = auc(ccd.test$DEFAULT, ccd.test$DEFAULT_PREDICTION)[1]
+
+#Record the scaling method
+Model_Performance$Scaling[i] = s
+
+#Record the sampling method for balancing an imbalanced dataset
+Model_Performance$Sampling[i] = c
+
+i=i+1
+}
+  
+}
+
+}
+
+}
+
+Model_Performance %>% arrange(-Accuracy)
+
+write.csv(Model_Performance, "model_performance.csv", row.names = FALSE)
+
+```
+
+
+
+
+```{r}
+
+Model_Performance <- read.csv("~/Documents/Academic/UVA_MSDS/STAT6021/Project_2/model_performance.csv")
+
+first = Model_Performance %>% mutate(combined = paste(Name, Scaling, Sampling)) %>% filter(Name == "Model 1: Everything"& Scaling == "No Scaling" & Sampling == "No Adjustment")
+
+second = Model_Performance %>% mutate(combined = paste(Name, Scaling, Sampling)) %>% filter(Name == "Model 1: Everything"& Scaling == "RobustScaler" & Sampling == "Over-Sample")
+
+third = Model_Performance %>% mutate(combined = paste(Name, Scaling, Sampling)) %>% filter(Name == "Model 2: Interactions"& Scaling == "MinMaxScaler" & Sampling == "Over-Sample")
+
+fourth = Model_Performance %>% mutate(combined = paste(Name, Scaling, Sampling)) %>% filter(Name == "Model 2: Interactions"& Scaling == "No Scaling" & Sampling == "No Adjustment")
+
+fifth = Model_Performance %>% mutate(combined = paste(Name, Scaling, Sampling)) %>% filter(Name == "Model 3: Two-Stage"& Scaling == "MinMaxScaler" & Sampling == "Over-Sample")
+
+sixth = Model_Performance %>% mutate(combined = paste(Name, Scaling, Sampling)) %>% filter(Name == "Model 3: Two-Stage"& Scaling == "No Scaling" & Sampling == "Over-Sample")
+
+seventh = Model_Performance %>% mutate(combined = paste(Name, Scaling, Sampling)) %>% filter(Name == "Model 4: Log Transformation"& Scaling == "No Scaling" & Sampling == "No Adjustment")
+
+eighth = Model_Performance %>% mutate(combined = paste(Name, Scaling, Sampling)) %>% filter(Name == "Model 4: Log Transformation"& Scaling == "RobustScaler" & Sampling == "No Adjustment")
+
+modper = rbind(first, second, third, fourth, fifth, sixth, seventh, eighth)
+
+modper %>% group_by(combined) %>% summarise(max_AUC = max(AUC), Average_Accuracy = mean(Accuracy)) %>% arrange(-max_AUC)
+
+seventh %>% arrange(-AUC) %>% filter(Prediction_Threshold == .275)
+```
+
+
+```{r Plotting Selected Model Performance, echo = FALSE}
+p12=ggplot(modper, aes(x = FPR, y = Recall,  group = interaction(Scaling, Sampling, Name), color = combined))+
+  geom_line(alpha = .4)+
+  #geom_point()+
+  geom_abline()+
+  labs(x = "False Positive Rate", y = "True Positive Rate", title = "ROC CURVE Model Comparison", caption = "")+
+  xlim(0.0,1.0)+
+  ylim(0.0,1.0)
+  #geom_text(hjust=0, vjust=0)
+
+p13=ggplot(modper, aes(x = Prediction_Threshold, y = AUC, group = interaction(Scaling, Sampling, Name), color = combined))+
+  geom_line(alpha = .4)+
+   #geom_point()+
+   xlim(0.0,1.0)+
+  ylim(0.0,1.0)+
+  labs(x = "Prediction_Threshold", y = "AUC", title = "Prediction Threshold vs AUC", caption = "...")
+
+p14=ggplot(modper, aes(x = Prediction_Threshold, y = Accuracy, group = interaction(Scaling, Sampling, Name), color = combined))+
+  geom_line()+
+  #geom_point()+
+   xlim(0.0,1.0)+
+  ylim(0.0,1.0)+
+  labs(x = "Prediction_Threshold", y = "Accuracy", title = "Prediction Threshold vs Accuracy", caption = ".Within each model, accuracy varies based upon the prediction threshold selected.")
+
+p15=ggplot(modper, aes(x = AUC, y = Accuracy, group = interaction(Scaling, Sampling, Name), color = combined))+
+  geom_point()+
+   xlim(0.0,1.0)+
+  ylim(0.0,1.0)+
+  #geom_point()+
+  labs(x = "AUC", y = "Accuracy", title = "AUC vs Accuracy", caption = "...")
+
+p12
+p13
+p14
+p15
+
+plot = ggarrange(p12, p13, ncol=2, nrow=1, common.legend = TRUE, legend="none",  label.y = 0, align = "hv")
+
+annotate_figure(plot, top = textGrob("Model Performance Comparison") , left = textGrob("", rot = 90, vjust = .5 , hjust=.5) , bottom = textGrob(""))
+
+plot7 = ggarrange(p15, p14, ncol=2, nrow=1, common.legend = TRUE, legend="right",  label.y = 0, align = "hv")
+
+annotate_figure(plot7, top = textGrob("Model Accuracy Comparison") , left = textGrob("", rot = 90, vjust = .5 , hjust=.5) , bottom = textGrob(""))
+
+```
+
+-----Break-----
+
+### End of Model Build for Report
+
+#### Model 5: Anova Drop Method 
+```{r Model 5: Anova Drop Method, eval=FALSE, include = FALSE, echo = FALSE}
+mod5 = glm(formula = DEFAULT~LIMIT_BAL+BILL_AMT1+BILL_AMT2+BILL_AMT3+BILL_AMT4+BILL_AMT5+BILL_AMT6+PAY_AMT1+PAY_AMT2+PAY_AMT3+PAY_AMT4+PAY_AMT5+PAY_AMT6+AVG_UTILIZATION_RATE+PAY_2+PAY_3+PAY_4+PAY_5+PAY_6+SEX+MARRIAGE+EDUCATION+AGE, family = binomial(link = "logit"), data=ccd.train)   
+
+mod5red = glm(formula = DEFAULT~LIMIT_BAL+BILL_AMT1+BILL_AMT5+PAY_AMT1+PAY_AMT2+PAY_AMT3+AVG_UTILIZATION_RATE+PAY_2+PAY_3+PAY_5+SEX+MARRIAGE, family = binomial(link = "logit"), data=ccd.train)   
+
+summary(mod5)
+anova(mod5)
+summary(mod5red)
+anova(mod5red)
+
+extract_eq(modmod5)
+```
+
+#### Model 6: Feature Importance + Interactions
+```{r Model 6: Backwards Step, eval=FALSE, include = FALSE, echo = FALSE}
+mod6 = glm(formula = DEFAULT ~ PAY_2*AVG_UTILIZATION_RATE*TOTAL_EXCESS_BALANCE+SEX+MARRIAGE, family = binomial(link = "logit"), data=ccd.train)                                                     
+summary(mod6)
+anova(mod6)
+```
+
+#### Model 7: bestglm output model
+```{r Model 7: bestglm, , eval=FALSE, include = FALSE, echo = FALSE}
+mod7 = glm(formula = DEFAULT~LIMIT_BAL+PAY_2+PAY_3+BILL_AMT1+BILL_AMT2+BILL_AMT3+PAY_AMT1+PAY_AMT2+PAY_AMT3+AVG_UTILIZATION_RATE, family = binomial(link = "logit"), data=ccd.train)  
+summary(mod7)
+anova(mod7)
+
+#REF: https://bookdown.org/tpinto_home/Regularisation/best-subset-selection.html
+#REF: https://dplyr.tidyverse.org/reference/relocate.html
+```
+
+#### Model 8: Bestglm and Log transformations
+```{r Model 8: Bestglm and log transformations, warning = FALSE , eval=FALSE, include = FALSE, echo = FALSE}
+mod8 = glm(formula = DEFAULT~log(LIMIT_BAL+.01)+SEX+AGE+log(BILL_AMT1+.01)+log(BILL_AMT2+.01)+log(BILL_AMT3+.01)+log(BILL_AMT4+.01)+log(BILL_AMT5+.01)+log(BILL_AMT6+.01)+log(PAY_AMT1+.01)+log(PAY_AMT2+.01)+log(PAY_AMT3+.01)+log(PAY_AMT4+.01)+log(PAY_AMT5+.01)+log(PAY_AMT6+.01)+log(AVG_UTILIZATION_RATE)+PAY_2+PAY_3+PAY_4+PAY_5+PAY_6, family = binomial(link = "logit"), data=ccd.train)  
+
+summary(mod8)
+anova(mod8)
+```
+
+```{r}
+mod4 = glm(formula = DEFAULT~log(LIMIT_BAL+.01)+SEX+AGE+log(BILL_AMT1_PRED+.01)+log(BILL_AMT2+.01)+log(BILL_AMT3+.01)+log(PAY_AMT1_PRED+.01)+log(PAY_AMT2+.01)+log(PAY_AMT3+.01)+log(AVG_UTILIZATION_RATE+.01)+PAY_2+PAY_3, family = binomial(link = "logit"), data=ccd.train)
+anova(mod4, test="Chisq")
+```
+
+```{r Optimize Threshold, include=FALSE, echo = FALSE, eval=FALSE}
+#search for an ideal threshold maximizing accuracy
+for( i in seq(0,1,.05)){
+ccd.test$DEFAULT_PREDICTION <- ifelse(ccd.test$DEFAULT_PROB_PREDICT >= .5, 1, 0 )
+
+#Creates vectors having data points
+expected_value <- factor(ccd.test$default.payment.next.month)
+predicted_value <- factor(ccd.test$DEFAULT_PREDICTION)
+
+#Creating confusion matrix
+#example <- confusionMatrix(data=predicted_value, reference = expected_value)
+
+#Display results 
+#print(i)
+#print(example$overall[1][1])
+}
+```
+
+#### **bestglm Tool**
+```{r bestglm tool, warning=FALSE, eval = FALSE, echo = False, include=FALSE}
+
+library(bestglm)
+library(dplyr)
+
+df <- ccd.train %>% select(LIMIT_BAL,3:4,8:10,14:16,21,DEFAULT)%>% relocate(DEFAULT, .after = last_col())
+
+rename(df,y=DEFAULT)
+
+best.logit <- bestglm(df,
+                IC = "AIC",                 # Information criteria for
+                family=binomial,
+                RequireFullEnumerationQ = TRUE)
+
+summary(best.logit$BestModel)
+anova(best.logit$BestModel)
+
+mod6<-best.logit$BestModel
+```
+
+#### **Feature Importance Tool from Boruta Package**
+```{r Feature Importance, eval = FALSE, echo = FALSE, include = FALSE}
+#Automated Random Forest Algo to support identification and confirmation important features.
+#Ref: https://appsilon.com/r-logistic-regression/
+#Ref: https://www.jstatsoft.org/article/view/v036i11
+#Ref: https://blog.mbq.me/relevance-and-redundancy/
+#Ref: https://cogns.northwestern.edu/cbmg/LiawAndWiener2002.pdf 
+#Warning this code takes some time
+library(Boruta)
+
+#run off of the base everything model
+boruta_output <- Boruta(DEFAULT~
+             BILL_AMT1+BILL_AMT2+BILL_AMT3+BILL_AMT4+BILL_AMT5+BILL_AMT6+
+             PAY_AMT1+PAY_AMT2+PAY_AMT3+PAY_AMT4+PAY_AMT5+PAY_AMT6+
+             PAY_2+PAY_3+PAY_4+PAY_5+PAY_6+
+             SEX + MARRIAGE + EDUCATION +AGE + AVG_UTILIZATION_RATE, data = ccd.train, doTrace = 0)
+```
+
+```{r boruta_output, eval = FALSE, echo = FALSE, include = FALSE}
+boruta_output
+
+rough_fix_mod <- TentativeRoughFix(boruta_output)
+boruta_signif <- getSelectedAttributes(rough_fix_mod)
+boruta_signif
+
+importances <- attStats(rough_fix_mod)
+importances <- importances[importances$decision != "Rejected", c("meanImp", "decision")]
+importances[order(-importances$meanImp), ]
+
+plot(boruta_output, ces.axis = 0.7, las = 2, xlab = "", main = "Feature importance", cex.axis = .4)
+
+```
+
+
+

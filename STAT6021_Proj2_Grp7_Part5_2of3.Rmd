@@ -1,0 +1,221 @@
+---
+title: "linreg"
+author: "Group 7"
+date: "2022-11-28"
+output: html_document
+---
+
+```{r}
+ library(tidyverse)
+ library(ggplot2)
+```
+
+```{r}
+ccd <- CreditCardDefault <- read.csv("ccd.csv")
+ head(ccd, 3)
+```
+
+#let's take a look at each variable levels
+
+```{r}
+class(ccd$EDUCATION)
+class(ccd$SEX)
+class(ccd$MARRIAGE)
+```
+#change to factor 
+```{r}
+ccd$EDUCATION<-factor(ccd$EDUCATION)
+ccd$SEX<-factor(ccd$SEX)
+ccd$MARRIAGE<-factor(ccd$MARRIAGE)
+
+
+class(ccd$EDUCATION)
+class(ccd$SEX)
+class(ccd$MARRIAGE)
+
+```
+#linear visualizations
+
+```{r}
+ggplot(ccd, aes(x=PAY_AMT2, y=BILL_AMT1))+
+  geom_point(alpha = 1/10) +
+  geom_smooth(method="lm", se=FALSE)+
+  labs(x="Previous Month Payment", y="Bill Amount (Sept 2005)",
+       title="Bill Amount and Previous Month Payment of Credit Card Clients")
+```
+```{r}
+ggplot(ccd, aes(x=BILL_AMT2, y=BILL_AMT1))+
+  geom_line()+
+  geom_smooth(kind = "lm")+
+  labs(title="September 2005 Bill Amount against August 2005 Bill Amount")
+
+```
+
+
+```{r}
+ggplot(ccd, aes(x = EDUCATION ,y = BILL_AMT1)) +
+  geom_boxplot(fill="orange") +
+  labs(x="Education",y="Bill Amount (NT Dollars)",title = "Credit Card Bill Amount in Sept 2005 Vs Education")
+```
+
+
+
+```{r}
+linear<-lm(BILL_AMT1 ~ LIMIT_BAL+BILL_AMT2+BILL_AMT3+PAY_AMT2+PAY_AMT3+AGE+SEX+EDUCATION+MARRIAGE, data = ccd)
+summary(linear)
+```
+
+T-tests seem to indicate that AGE and MARRIAGESSingle are not significant, given the other variables in the model. Let's see if we can remove them.
+
+$H_{0} : B_{1} = B_{2} = B_{3} = B_{4} = ... B_{p} = 0$
+
+$H_{a}$ : at least one of the coefficients in $H_{0}$ is not zero.
+
+```{r}
+reduced<-lm(BILL_AMT1 ~ LIMIT_BAL+BILL_AMT2+BILL_AMT3+PAY_AMT2+PAY_AMT3+SEX+EDUCATION, data = ccd)
+summary(reduced)
+```
+
+
+```{r}
+anova(reduced,linear)
+```
+
+Our F statistic is 0.0494 with a p-value of 0.9518. We do not reject the null hypothesis. Our data suggests we can drop the predictors AGE and MARRIAGE and go with the reduced model.
+
+```{r}
+summary(reduced)
+```
+
+#Let's double check our reduced model by doing the regsubsets() function to run all possible regressions on our original (full) predictor set.r
+
+```{r}
+library(leaps)
+allreg<-regsubsets(BILL_AMT1 ~ LIMIT_BAL+BILL_AMT2+BILL_AMT3+PAY_AMT2+PAY_AMT3+AGE+SEX+EDUCATION+MARRIAGE, data = ccd, nbest = 2)
+summary(allreg)
+```
+
+#Let's see which model has the best (highest) adjusted $R^{2}$.
+
+```{r}
+coef(allreg, which.max(summary(allreg)$adjr2))
+```
+
+This model dropped AGE and MARRIAGE like our reduced model did. It also dropped SEX.
+
+#Let's see which model is has the best (lowest) Mallow's $C_p$.
+
+```{r}
+coef(allreg, which.min(summary(allreg)$cp))
+```
+
+This has the same predictors as the model which maximizes adjusted $R^2$. It drops AGE, MARRIAGE, and SEX.
+
+#Let's see which model has the best (lowest) BIC.
+
+```{r}
+coef(allreg, which.min(summary(allreg)$bic))
+```
+
+
+This model removes some of the education factors. It's only a predictor for clients who attended university.
+
+Lastly, let's try a stepwise regression to see which model will be the best. We will start with an intercept-only model.
+
+```{r}
+regnull<- lm(BILL_AMT1 ~ 1, data = ccd)
+step(regnull, scope = list(lower=regnull, upper=linear), direction = "both")
+```
+
+The stepwise regression ends with the same predictors as our reduced model above. We remove only AGE and MARRIAGE.
+
+#let's validate the linear regression assumptions
+#residial plot, ACF plot of the residuals, QQ plot of the residuals
+#additionally with categorical predictors we need to that the variance of the 
+#response variable is constant accross all levels of the categorical predictor using a box plot
+
+```{r}
+#create residual plot
+plot(reduced$residuals)
+abline(h=0, col="blue")
+```
+
+
+# residuals appear evenly scattered around the horizontal axis with no apparent pattern. 
+# Assumption 1 (linear relationship) and assumption 2 (mean = 0) appear to be met
+#  
+
+```{r}
+#plot ACF of the reduced model
+x.acf<-acf(reduced$residuals)
+```
+
+
+
+
+```{r}
+#remove lag 0 to see individual lag parameters easier
+
+plot(x.acf, acfLag0=FALSE)
+```
+#ACF plot looks good, all lags within the blue lines indicates assumption 4 is met (error terms are uncorrelated)
+
+#now do QQ plot
+
+```{r}
+qqnorm(reduced$residuals)
+qqline(reduced$residuals)
+#try and do the QQ plot in ggplot
+```
+#the reduced model does not seem to verify that assumption 5 is met (normality)
+#as the residuals do not fall close to the line at both ends
+
+
+#additional assumption for categorical predictor
+#is the variance of the response variable constant between all classes of the
+#categorical predictor?
+```{r}
+ggplot(ccd, aes(x=SEX, y=BILL_AMT1, color=SEX))+
+  geom_boxplot()+
+  labs(title="Distribution of BILL_AMT1 by SEX")
+```
+# variance looks equal for sex - the spread is siilar across all levels
+# now check education
+
+```{r}
+ggplot(ccd, aes(x=EDUCATION, y=BILL_AMT1, color=EDUCATION))+
+  geom_boxplot()+
+  labs(title="Distribution of BiILL_AMT1 by EDUCATION")
+```
+# the spread for Grad School, High School and University look similar, but the spread for "Other" is not
+
+```{r}
+ggplot(ccd, aes(x=SEX, y=BILL_AMT1))+
+  geom_boxplot()+
+  labs(title="Dist of Bill_AMT1 by SEX")
+```
+
+
+
+
+
+
+# let's use Levine's test to test for the equality of variance accross all levels
+
+```{r}
+library(lawstat)
+levene.test(ccd$BILL_AMT1, ccd$SEX)
+```
+# the null hypothesis for Levene's test is that the variances are equal accross
+# all classes of the categorical predictor. Since the p-value is small, we reject
+# the null hypothesis and conclude that the variances are not equal accross all classes
+
+
+
+
+
+
+
+
+
+
