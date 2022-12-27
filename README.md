@@ -1,4 +1,5 @@
-# Credit_Card_Defaults
+# Predicting Credit Card Defaults
+## Logistic Regression, Machine Learning, Model Selection, Data Visualization, Feature Engineering
 
 ### Background
 The project within this repo is from a group project, completed as a part of a Master of Science in Data Science. The project used R and .Rmd and multiple key data science packages useful for analysis, visualization, wrangling, modeling, and statistical analysis. The project insights are communicated through a report and a brief presentation. A report was also generated using R Markdown. 
