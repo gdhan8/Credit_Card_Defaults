@@ -1,5 +1,5 @@
 ---
-title: 'STAT 6021: Project 2'
+title: 'Credit Card Default Project'
 author: 'Grant Hanley ... User ID: yep8eq'
 date: "2022-11-01"
 output:
