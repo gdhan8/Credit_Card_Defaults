@@ -16,5 +16,5 @@ Predicting credit card defaults can help lenders identify customers who may be a
 We predicted credit card default through the use of through meta-analysis of multiple logistic regression models combined various modeling tuning techniques, resulting in a model selection that we deemed to be acceptable. Our techniques and models provided flexibility to select a final useful in the prediction of the probability of default given specific business decision and costs. Any one of the models we produced can be used to predict the probability of default to varying degrees of accuracy and with tradeoffs in classification error. By creating a variety of models and recording their perfomance in detail across several engineered features, sampling techniques, prediction thresholds, and model formulas, we provide a framework for detailed costs associated with false positives and false negatives to be applied for final model selection. We recommend a model based on ROC, AUC, and relative performance at a particular threshold. 
 
 ## Final Report
-Report and R Markdown code can be found here: https://rpubs.com/gdhan8/Predicting_Credit_Card_Defaults
+Final HTML version of R Markdown code can be found here: https://rpubs.com/gdhan8/Predicting_Credit_Card_Defaults
 
